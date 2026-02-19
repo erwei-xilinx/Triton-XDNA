@@ -34,6 +34,7 @@ from setuptools.command.build_py import build_py
 from setuptools.command.develop import develop
 from setuptools.command.install import install
 
+
 try:
     from wheel.bdist_wheel import bdist_wheel
 except ImportError:
@@ -45,9 +46,19 @@ except ImportError:
 # =============================================================================
 
 BASE_DIR = Path(__file__).parent.resolve()
-TRITON_SOURCE_DIR = BASE_DIR / "third_party" / "triton"
+THIRD_PARTY_DIR = BASE_DIR / "third_party"
+TRITON_SOURCE_DIR = THIRD_PARTY_DIR / "triton"
+TRITON_SHARED_DIR = THIRD_PARTY_DIR / "triton_shared"
 AMD_TRITON_NPU_DIR = BASE_DIR / "amd_triton_npu"
-TRITON_SHARED_DIR = BASE_DIR / "third_party" / "triton_shared"
+
+# Patch configuration: (submodule_name, patch_file)
+PATCHES = [
+    ("triton", "triton.patch"),
+    ("triton_shared", "triton_shared.patch"),
+]
+
+# Marker file name to track if patches have been applied
+PATCH_MARKER_FILE = ".patches_applied"
 
 
 def find_triton_shared_opt_binary(triton_source_dir: Path = None) -> Path:
@@ -86,6 +97,92 @@ def find_triton_shared_opt_binary(triton_source_dir: Path = None) -> Path:
 def check_env_flag(name: str, default: str = "") -> bool:
     """Check if an environment variable is set to a truthy value."""
     return os.getenv(name, default).upper() in ["ON", "1", "YES", "TRUE", "Y"]
+
+
+# =============================================================================
+# Patch Management
+# =============================================================================
+
+
+def apply_submodule_patches():
+    """
+    Apply local patches to third-party submodules before building.
+
+    This function applies patch files from third_party/ to their respective
+    submodules. It uses marker files to track whether patches have been applied
+    to avoid re-applying them on subsequent builds.
+    """
+    print("=" * 60, file=sys.stderr)
+    print("Checking/applying patches to submodules", file=sys.stderr)
+    print("=" * 60, file=sys.stderr)
+
+    for submodule_name, patch_name in PATCHES:
+        submodule_dir = THIRD_PARTY_DIR / submodule_name
+        patch_file = THIRD_PARTY_DIR / patch_name
+        marker_file = submodule_dir / PATCH_MARKER_FILE
+
+        print(f"\n[{submodule_name}]", file=sys.stderr)
+
+        # Check if submodule directory exists
+        if not submodule_dir.exists():
+            print(
+                f"  ⚠ Submodule directory not found: {submodule_dir}", file=sys.stderr
+            )
+            continue
+
+        # Check if patch file exists
+        if not patch_file.exists():
+            print(f"  ⚠ Patch file not found: {patch_file}", file=sys.stderr)
+            continue
+
+        # Check if already applied (marker exists)
+        if marker_file.exists():
+            print(f"  ✓ Patches already applied (marker exists)", file=sys.stderr)
+            continue
+
+        # Check if patch can be applied (dry run)
+        check_result = subprocess.run(
+            ["git", "apply", "--check", str(patch_file)],
+            cwd=submodule_dir,
+            capture_output=True,
+            text=True,
+        )
+
+        if check_result.returncode != 0:
+            # Check if patch is already applied by trying reverse
+            reverse_result = subprocess.run(
+                ["git", "apply", "--check", "--reverse", str(patch_file)],
+                cwd=submodule_dir,
+                capture_output=True,
+                text=True,
+            )
+
+            if reverse_result.returncode == 0:
+                print(f"  ✓ Patch already applied", file=sys.stderr)
+                marker_file.touch()
+            else:
+                print(
+                    f"  ✗ Patch conflict: {check_result.stderr.strip()}",
+                    file=sys.stderr,
+                )
+            continue
+
+        # Apply the patch
+        print(f"  Applying {patch_name}...", file=sys.stderr)
+        apply_result = subprocess.run(
+            ["git", "apply", str(patch_file)],
+            cwd=submodule_dir,
+            capture_output=True,
+            text=True,
+        )
+
+        if apply_result.returncode == 0:
+            print(f"  ✓ Patch applied successfully", file=sys.stderr)
+            marker_file.touch()
+        else:
+            print(f"  ✗ Failed to apply patch: {apply_result.stderr}", file=sys.stderr)
+
+    print("\n" + "=" * 60, file=sys.stderr)
 
 
 # =============================================================================
@@ -191,6 +288,9 @@ class TritonXdnaBdistWheel(bdist_wheel):
     """
 
     def run(self):
+        # Apply patches before building
+        apply_submodule_patches()
+
         print("=" * 60, file=sys.stderr)
         print("Building Triton XDNA wheel", file=sys.stderr)
         print("=" * 60, file=sys.stderr)
@@ -576,6 +676,9 @@ class TritonXdnaDevelop(develop):
     """Development install - uses pip install on triton like before."""
 
     def run(self):
+        # Apply patches before building
+        apply_submodule_patches()
+
         env = os.environ.copy()
         plugin_dirs = f"{TRITON_SHARED_DIR};{AMD_TRITON_NPU_DIR}"
         env["TRITON_PLUGIN_DIRS"] = plugin_dirs
@@ -634,6 +737,9 @@ class TritonXdnaInstall(install):
     """Custom install that builds triton with plugins."""
 
     def run(self):
+        # Apply patches before building
+        apply_submodule_patches()
+
         env = os.environ.copy()
         plugin_dirs = f"{TRITON_SHARED_DIR};{AMD_TRITON_NPU_DIR}"
         env["TRITON_PLUGIN_DIRS"] = plugin_dirs
