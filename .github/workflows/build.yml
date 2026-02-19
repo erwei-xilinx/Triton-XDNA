@@ -24,7 +24,6 @@ jobs:
      with:
       fetch-depth: 2
       submodules: recursive
-      token: ${{ secrets.SUBMODULE_PAT }}
    - name: Ccache for C++ compilation
      uses: hendrikmuhs/ccache-action@v1.2.12
      with:
