@@ -1,0 +1,86 @@
+on:
+ push:
+  branches:
+   - main
+ pull_request:
+ workflow_dispatch:
+
+jobs:
+ build-repo:
+  name: Build Triton Repo
+  runs-on: ubuntu-latest
+  steps:
+   - name: Free disk space
+     uses: descriptinc/free-disk-space@main
+     with:
+       tool-cache: true
+       android: true
+       dotnet: true
+       haskell: true
+       large-packages: true
+       swap-storage: false
+   - name: Get repo
+     uses: actions/checkout@v3
+     with:
+      fetch-depth: 2
+      submodules: recursive
+      token: ${{ secrets.SUBMODULE_PAT }}
+   - name: Ccache for C++ compilation
+     uses: hendrikmuhs/ccache-action@v1.2.12
+     with:
+       key: ${{ runner.os }}-clangreleaseasserts-${{ steps.get-submodule-hash.outputs.hash }}
+       max-size: 1G
+   - name: Install packages
+     run: |
+      sudo apt-get update
+      sudo apt-get install -y ninja-build build-essential cmake clang lld
+   - name: Install python packages
+     run: |
+      pip cache purge
+      pip install --upgrade pip
+      pip install lit cmake joblib pybind11 nanobind
+
+   - name: Install MLIR-AIE with specified hash
+     shell: bash
+     run: |
+      MLIR_AIE_COMMIT_HASH_FILE=utils/mlir-aie-hash.txt
+      # Install mlir-aie
+      MLIR_AIE_COMMIT_HASH=$(awk -v kw="Commit:" '$0 ~ kw {for (i=1; i<NF; i++) if ($i == kw) print $(i+1)}' "$MLIR_AIE_COMMIT_HASH_FILE")
+      SHORT_MLIR_AIE_COMMIT_HASH="${MLIR_AIE_COMMIT_HASH:0:7}"
+      echo "Using mlir-aie hash: $SHORT_MLIR_AIE_COMMIT_HASH"
+      MLIR_AIE_VERSION=$(awk -v kw="Version:" '$0 ~ kw {for (i=1; i<NF; i++) if ($i == kw) print $(i+1)}' "$MLIR_AIE_COMMIT_HASH_FILE")
+      echo "Version: $MLIR_AIE_VERSION"
+      TIMESTAMP=$(awk -v kw="Timestamp:" '$0 ~ kw {for (i=1; i<NF; i++) if ($i == kw) print $(i+1)}' "$MLIR_AIE_COMMIT_HASH_FILE")
+      echo "Timestamp: $TIMESTAMP"
+      python3 -m pip install mlir_aie==$MLIR_AIE_VERSION.$TIMESTAMP+$SHORT_MLIR_AIE_COMMIT_HASH.no.rtti -f https://github.com/Xilinx/mlir-aie/releases/expanded_assets/latest-wheels-no-rtti/
+      # Install mlir-air
+      MLIR_AIR_HASH_FILE=utils/mlir-air-hash.txt
+      MLIR_AIR_COMMIT_HASH=$(awk -v kw="Commit:" '$0 ~ kw {for (i=1; i<NF; i++) if ($i == kw) print $(i+1)}' "$MLIR_AIR_HASH_FILE")
+      SHORT_MLIR_AIR_COMMIT_HASH="${MLIR_AIR_COMMIT_HASH:0:7}"
+      echo "Using mlir-air hash: $SHORT_MLIR_AIR_COMMIT_HASH"
+      MLIR_AIR_VERSION=$(awk -v kw="Version:" '$0 ~ kw {for (i=1; i<NF; i++) if ($i == kw) print $(i+1)}' "$MLIR_AIR_HASH_FILE")
+      echo "mlir-air version: $MLIR_AIR_VERSION"
+      MLIR_AIR_TIMESTAMP=$(awk -v kw="Timestamp:" '$0 ~ kw {for (i=1; i<NF; i++) if ($i == kw) print $(i+1)}' "$MLIR_AIR_HASH_FILE")
+      echo "mlir-air timestamp: $MLIR_AIR_TIMESTAMP"
+      python3 -m pip install mlir_air==$MLIR_AIR_VERSION.$MLIR_AIR_TIMESTAMP+$SHORT_MLIR_AIR_COMMIT_HASH.no.rtti -f https://github.com/Xilinx/mlir-air/releases/expanded_assets/latest-air-wheels-no-rtti
+      # Install llvm-aie
+      LLVM_AIE_HASH_FILE=utils/llvm-aie-hash.txt
+      LLVM_AIE_COMMIT_HASH=$(awk -v kw="Commit:" '$0 ~ kw {for (i=1; i<NF; i++) if ($i == kw) print $(i+1)}' "$LLVM_AIE_HASH_FILE")
+      echo "Using llvm-aie hash: $LLVM_AIE_COMMIT_HASH"
+      LLVM_AIE_VERSION=$(awk -v kw="Version:" '$0 ~ kw {for (i=1; i<NF; i++) if ($i == kw) print $(i+1)}' "$LLVM_AIE_HASH_FILE")
+      echo "llvm-aie version: $LLVM_AIE_VERSION"
+      LLVM_AIE_TIMESTAMP=$(awk -v kw="Timestamp:" '$0 ~ kw {for (i=1; i<NF; i++) if ($i == kw) print $(i+1)}' "$LLVM_AIE_HASH_FILE")
+      echo "llvm-aie timestamp: $LLVM_AIE_TIMESTAMP"
+      python3 -m pip install llvm_aie==$LLVM_AIE_VERSION.$LLVM_AIE_TIMESTAMP+$LLVM_AIE_COMMIT_HASH -f https://github.com/Xilinx/llvm-aie/releases/expanded_assets/nightly
+      # Set environmental variable "MLIR_AIE_INSTALL_DIR"
+      MLIR_AIE_INSTALL_DIR_STR="$(python3 -m pip show mlir_aie | grep ^Location: | awk '{print $2}')/mlir_aie"
+      echo "MLIR_AIE_INSTALL_DIR=$MLIR_AIE_INSTALL_DIR_STR" >> $GITHUB_ENV
+      # Update paths in environmental variables
+      echo "${MLIR_AIE_INSTALL_DIR}/bin" >> $GITHUB_PATH
+      echo "PYTHONPATH=${MLIR_AIE_INSTALL_DIR}/python:$PYTHONPATH" >> $GITHUB_ENV
+      echo "LD_LIBRARY_PATH=${MLIR_AIE_INSTALL_DIR}/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+   - name: Build
+     run: |
+      mkdir build
+      cmake -GNinja -S . -Bbuild -DPIP_INSTALL_TARGET=$PWD/installed_triton_package
+      ninja -Cbuild

@@ -1,0 +1,141 @@
+name: Build Triton XDNA Wheels
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      TRITON_XDNA_COMMIT:
+        description: 'Commit hash to build (leave empty for HEAD)'
+        type: string
+        required: false
+        default: ''
+  push:
+    tags:
+      - 'v*.*.*'
+  merge_group:
+  schedule:
+    # Daily at 04:00 UTC (see https://crontab.guru)
+    - cron: '0 4 * * *'
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  # Cancel in-progress runs for same PR or commit
+  group: ci-build-wheels-${{ github.event.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  build-wheels:
+    name: Build triton wheel (Python ${{ matrix.python_version }})
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: write
+      packages: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python_version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+
+    steps:
+      - name: Free disk space
+        uses: descriptinc/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: false
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          submodules: recursive
+          token: ${{ secrets.SUBMODULE_PAT }}
+
+      - name: Set up Python ${{ matrix.python_version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python_version }}
+
+      - name: Get commit info
+        id: commit-info
+        run: |
+          if [ -n "${{ inputs.TRITON_XDNA_COMMIT }}" ]; then
+            COMMIT="${{ inputs.TRITON_XDNA_COMMIT }}"
+          else
+            COMMIT=$(git rev-parse --short=7 HEAD)
+          fi
+          echo "commit=$COMMIT" >> $GITHUB_OUTPUT
+          echo "datetime=$(date +%Y%m%d%H)" >> $GITHUB_OUTPUT
+          echo "Building triton-xdna commit: $COMMIT"
+
+      - name: Install cibuildwheel
+        run: |
+          pip install --upgrade pip
+          pip install cibuildwheel
+
+      - name: Build wheels with cibuildwheel
+        env:
+          TRITON_XDNA_PROJECT_COMMIT: ${{ steps.commit-info.outputs.commit }}
+          DATETIME: ${{ steps.commit-info.outputs.datetime }}
+          TRITON_BUILD_WITH_CLANG_LLD: "true"
+        run: |
+          # Convert python version (e.g., "3.11" -> "cp311")
+          PY_VERSION="${{ matrix.python_version }}"
+          CIBW_BUILD="cp${PY_VERSION//./}-manylinux_x86_64"
+          echo "Building for: $CIBW_BUILD"
+          
+          # Build wheel using cibuildwheel
+          CIBW_BUILD="$CIBW_BUILD" cibuildwheel --platform linux --output-dir wheelhouse
+
+      - name: List built wheels
+        run: |
+          ls -la wheelhouse/
+          echo "Built wheels:"
+          ls wheelhouse/*.whl
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: triton-wheel-py${{ matrix.python_version }}
+          path: wheelhouse/*.whl
+
+      - name: Release wheels
+        if: |
+          github.event_name == 'workflow_dispatch' ||
+          github.event_name == 'schedule' ||
+          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
+        uses: ncipollo/release-action@v1.12.0
+        with:
+          artifacts: wheelhouse/*.whl
+          token: "${{ secrets.GITHUB_TOKEN }}"
+          tag: ${{ github.event_name == 'push' && github.ref_name || 'latest-wheels' }}
+          name: ${{ github.event_name == 'push' && github.ref_name || 'Nightly Wheels' }}
+          body: |
+            ## Triton XDNA Wheels
+
+            **Commit:** ${{ steps.commit-info.outputs.commit }}
+            **Build Date:** ${{ steps.commit-info.outputs.datetime }}
+            **Python Version:** ${{ matrix.python_version }}
+
+            ### Installation
+
+            ```bash
+            pip install triton-xdna \
+              --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/latest-wheels \
+              --find-links https://github.com/Xilinx/mlir-aie/releases/expanded_assets/latest-wheels-no-rtti \
+              --find-links https://github.com/Xilinx/llvm-aie/releases/expanded_assets/nightly \
+              --find-links https://github.com/Xilinx/mlir-air/releases/expanded_assets/latest-air-wheels-no-rtti
+            ```
+          allowUpdates: true
+          replacesArtifacts: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
+          makeLatest: ${{ github.event_name == 'push' }}
+          prerelease: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}

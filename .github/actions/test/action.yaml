@@ -1,0 +1,131 @@
+# SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: "Run test suite"
+
+inputs:
+  env_name:
+    required: false
+    default: "ci_env"
+  device:
+    description: "Target device architecture: aie2 (npu1) or aie2p (npu2)"
+    required: false
+    default: "aie2"
+
+
+runs:
+  using: "composite"
+  steps:
+    - name: Test
+      env:
+        HOME: /workspace
+      shell: "bash"
+      run: |
+        set -x  # Enable command tracing
+        
+        echo ""
+        echo "=========================================="
+        echo "STEP 1: Source XRT"
+        echo "=========================================="
+        if [ -f /opt/xilinx/xrt/setup.sh ]; then
+          echo "XRT setup.sh found, sourcing..."
+          source /opt/xilinx/xrt/setup.sh
+        else
+          echo "ERROR: XRT setup.sh not found!"
+          exit 1
+        fi
+        
+        echo ""
+        echo "=========================================="
+        echo "STEP 2: Activate Virtual Environment"
+        echo "=========================================="
+        if [ -f "${{ inputs.env_name }}/bin/activate" ]; then
+          echo "Virtual environment found at ${{ inputs.env_name }}"
+          source ${{ inputs.env_name }}/bin/activate
+        else
+          echo "ERROR: Virtual environment not found at ${{ inputs.env_name }}"
+          ls -la
+          exit 1
+        fi
+        
+        echo ""
+        echo "=========================================="
+        echo "STEP 3: Check for utils/env_setup.sh"
+        echo "=========================================="
+        if [ -f utils/env_setup.sh ]; then
+          echo "env_setup.sh found"
+          
+          # Set MLIR_AIE_INSTALL_DIR first to skip reinstallation
+          echo "Setting MLIR_AIE_INSTALL_DIR..."
+          export MLIR_AIE_INSTALL_DIR="$(python3 -m pip show mlir_aie 2>/dev/null | grep ^Location: | awk '{print $2}')/mlir_aie"
+          echo "MLIR_AIE_INSTALL_DIR: $MLIR_AIE_INSTALL_DIR"
+          
+          echo "Sourcing env_setup.sh..."
+          source utils/env_setup.sh
+        else
+          echo "WARNING: utils/env_setup.sh not found, skipping"
+        fi
+        
+        echo ""
+        echo "=========================================="
+        echo "STEP 4: Set LLVM_BINARY_DIR"
+        echo "=========================================="
+        
+        LLVM_BIN_PATH=$(find ~/.triton/llvm/ -name bin 2>/dev/null | head -1)
+        if [ -n "$LLVM_BIN_PATH" ]; then
+          export LLVM_BINARY_DIR="$LLVM_BIN_PATH"
+          echo "LLVM_BINARY_DIR set to: $LLVM_BINARY_DIR"
+        else
+          echo "WARNING: LLVM bin directory not found"
+        fi
+        
+        echo ""
+        echo "=========================================="
+        echo "STEP 5: Set Triton-XDNA PYTHONPATH"
+        echo "=========================================="
+        TRITON_LOCATION=$(python -m pip show triton_xdna 2>/dev/null | awk '/^Location:/ {print $2}')
+        if [ -n "$TRITON_LOCATION" ]; then
+          echo "Triton found at: $TRITON_LOCATION"
+          if [ -d "${TRITON_LOCATION}/triton/mlir_air/python" ]; then
+            export PYTHONPATH="${TRITON_LOCATION}/triton/mlir_air/python:$PYTHONPATH"
+            echo "Added to PYTHONPATH: ${TRITON_LOCATION}/triton/mlir_air/python"
+          else
+            echo "WARNING: mlir_air/python not found in Triton location"
+            ls -la "${TRITON_LOCATION}/triton/" 2>/dev/null || echo "triton directory not found"
+          fi
+        else
+          echo "WARNING: Triton package not found"
+        fi
+        
+        echo ""
+        echo "=========================================="
+        echo "STEP 6: Set TRITON_SHARED_OPT_PATH"
+        echo "=========================================="
+        echo "Searching for triton-shared-opt..."
+        TRITON_SHARED_OPT=$(find "$GITHUB_WORKSPACE/third_party/triton/build" -name triton-shared-opt 2>/dev/null | head -1)
+        if [ -n "$TRITON_SHARED_OPT" ]; then
+          export TRITON_SHARED_OPT_PATH="$TRITON_SHARED_OPT"
+          echo "TRITON_SHARED_OPT_PATH set to: $TRITON_SHARED_OPT_PATH"
+        else
+          echo "WARNING: triton-shared-opt not found"
+          echo "Checking build directory..."
+          ls -la "$GITHUB_WORKSPACE/third_party/triton/build" 2>/dev/null || echo "Build directory not found"
+        fi
+        
+        echo ""
+        echo "=========================================="
+        echo "STEP 7: Final Environment Summary"
+        echo "=========================================="
+        echo "LLVM_BINARY_DIR: $LLVM_BINARY_DIR"
+        echo "TRITON_SHARED_OPT_PATH: $TRITON_SHARED_OPT_PATH"
+        echo "MLIR_AIE_INSTALL_DIR: $MLIR_AIE_INSTALL_DIR"
+        echo "PYTHONPATH: $PYTHONPATH"
+        echo "PATH: $PATH"
+        echo "LD_LIBRARY_PATH: $LD_LIBRARY_PATH"
+        
+        echo ""
+        echo "=========================================="
+        echo "STEP 8: Run Tests"
+        echo "=========================================="
+        echo "Target device: ${{ inputs.device }}"
+        python scripts/run_tests.py --device ${{ inputs.device }} --verbose --timeout 1200
